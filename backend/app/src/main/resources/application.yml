@@ -1,0 +1,81 @@
+# HSNV application configuration (feature 001).
+# Profile `dev` is the default when no profile is set (local development + docker-compose.yml).
+# Other environments must set SPRING_PROFILES_ACTIVE and the DB_* variables explicitly.
+
+spring:
+  application:
+    name: hsnv
+  profiles:
+    default: dev
+
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USER}
+    password: ${DB_PASSWORD}
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      # Schema is owned by Flyway; Hibernate only checks that entities match it.
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          # All instants are stored and read as UTC; branch zone (Europe/Berlin) is applied in code.
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+  # i18n: message bundles in src/main/resources/i18n/messages_{de,en,vi}.properties (T016)
+  messages:
+    basename: i18n/messages
+    encoding: UTF-8
+    fallback-to-system-locale: false
+
+  web:
+    locale: de
+    locale-resolver: accept-header
+
+  servlet:
+    multipart:
+      # Document scans are limited to 10 MB (FR, T027)
+      max-file-size: 10MB
+      max-request-size: 11MB
+
+  jackson:
+    time-zone: UTC
+    serialization:
+      write-dates-as-timestamps: false
+
+server:
+  port: 8080
+  servlet:
+    session:
+      cookie:
+        http-only: true
+        same-site: lax
+
+springdoc:
+  api-docs:
+    path: /api-docs
+
+---
+# Local development: matches docker-compose.yml (postgres:16, db hsnv, password dev).
+# DEV ONLY values — never use them outside a developer machine.
+spring:
+  config:
+    activate:
+      on-profile: dev
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/hsnv}
+    username: ${DB_USER:hsnv}
+    password: ${DB_PASSWORD:dev}
+  flyway:
+    # Synthetic dev seed data (T018) lives in db/migration/dev and is loaded only in this profile.
+    locations: classpath:db/migration,classpath:db/migration/dev
+
+logging:
+  level:
+    de.hsnv: DEBUG

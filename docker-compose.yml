@@ -1,0 +1,28 @@
+# Local development database for HSNV (feature 001).
+# Start:  docker compose up -d
+# Stop:   docker compose down        (add -v to also delete the data volume)
+#
+# DEV ONLY: the password "dev" is a local development value, never use it in production.
+services:
+  postgres:
+    image: postgres:16
+    container_name: hsnv-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hsnv
+      POSTGRES_USER: hsnv
+      POSTGRES_PASSWORD: dev
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      - "5432:5432"
+    volumes:
+      - hsnv-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hsnv -d hsnv"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  hsnv-pgdata:

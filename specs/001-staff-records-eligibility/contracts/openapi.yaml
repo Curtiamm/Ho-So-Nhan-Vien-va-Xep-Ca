@@ -1,0 +1,173 @@
+openapi: 3.0.3
+info:
+  title: Staff Records & Eligibility API
+  version: 0.1.0
+servers:
+  - url: /api/v1
+paths:
+  /employees:
+    get:
+      summary: List employees visible to the caller (branch-scoped)
+      parameters:
+        - { name: branchId, in: query, schema: { type: string, format: uuid } }
+        - { name: active, in: query, schema: { type: boolean } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Employee" } } } } }
+    post:
+      summary: Create employee (ADMIN, BRANCH_MANAGER of the branch)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/EmployeeInput" } } } }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Employee" } } } }
+        "403": { description: Branch not in caller scope }
+  /employees/{id}:
+    parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
+    get: { summary: Get employee, responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Employee" } } } }, "403": { description: Forbidden } } }
+    put: { summary: Update employee, requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/EmployeeInput" } } } }, responses: { "200": { description: OK } } }
+    delete: { summary: Deactivate employee (sets retention date), responses: { "204": { description: Deactivated } } }
+  /employees/{id}/documents:
+    parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
+    get: { summary: List documents and trainings, responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/DocumentRecord" } } } } } } }
+    post: { summary: Add document record, requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/DocumentInput" } } } }, responses: { "201": { description: Created } } }
+  /documents/{docId}/verify:
+    post:
+      summary: Mark document VERIFIED or REJECTED
+      parameters: [ { name: docId, in: path, required: true, schema: { type: string, format: uuid } } ]
+      requestBody: { content: { application/json: { schema: { type: object, properties: { status: { type: string, enum: [VERIFIED, REJECTED] } } } } } }
+      responses: { "200": { description: OK } }
+  /documents/{docId}/scan:
+    parameters: [ { name: docId, in: path, required: true, schema: { type: string, format: uuid } } ]
+    put: { summary: Upload scan (only copy_required types; PDF/JPEG/PNG ≤ 10 MB), requestBody: { content: { multipart/form-data: { schema: { type: object, properties: { file: { type: string, format: binary } } } } } }, responses: { "204": { description: Stored }, "409": { description: Type does not allow copies } } }
+    get: { summary: Download scan (audited), responses: { "200": { description: File }, "403": { description: Forbidden } } }
+  /employees/{id}/absences:
+    parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
+    get: { summary: List absences, responses: { "200": { description: OK } } }
+    post: { summary: Add absence, requestBody: { content: { application/json: { schema: { $ref: "#/components/schemas/Absence" } } } }, responses: { "201": { description: Created } } }
+  /employees/{id}/flags:
+    parameters: [ { name: id, in: path, required: true, schema: { type: string, format: uuid } } ]
+    get: { summary: List protective flags, responses: { "200": { description: OK } } }
+    post: { summary: Add protective flag, requestBody: { content: { application/json: { schema: { $ref: "#/components/schemas/ProtectiveFlag" } } } }, responses: { "201": { description: Created } } }
+  /eligibility/check:
+    post:
+      summary: Check eligibility of one employee for one shift
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/EligibilityRequest" } } } }
+      responses:
+        "200": { description: Result, content: { application/json: { schema: { $ref: "#/components/schemas/EligibilityResult" } } } }
+  /eligibility/check-batch:
+    post:
+      summary: Check many employee/shift pairs (used by planning)
+      requestBody: { required: true, content: { application/json: { schema: { type: array, maxItems: 2000, items: { $ref: "#/components/schemas/EligibilityRequest" } } } } }
+      responses:
+        "200": { description: Results in request order, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/EligibilityResult" } } } } }
+  /expiries:
+    get:
+      summary: Upcoming expiries and due re-trainings
+      parameters:
+        - { name: branchId, in: query, schema: { type: string, format: uuid } }
+        - { name: withinDays, in: query, schema: { type: integer, default: 30, minimum: 1, maximum: 365 } }
+      responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/ExpiryItem" } } } } } }
+  /requirements:
+    get: { summary: List requirement types and versions, responses: { "200": { description: OK } } }
+    post: { summary: Add requirement version (ADMIN), requestBody: { content: { application/json: { schema: { $ref: "#/components/schemas/RequirementVersion" } } } }, responses: { "201": { description: Created }, "409": { description: Overlapping effective range } } }
+  /me/record:
+    get: { summary: Employee's own record, documents and expiries, responses: { "200": { description: OK } } }
+components:
+  schemas:
+    EmployeeInput:
+      type: object
+      required: [firstName, lastName, dateOfBirth, euStatus, contractType, startDate, branchIds, roles]
+      properties:
+        firstName: { type: string }
+        lastName: { type: string }
+        dateOfBirth: { type: string, format: date }
+        euStatus: { type: string, enum: [EU_EEA, NON_EU] }
+        contractType: { type: string, enum: [FULL_TIME, PART_TIME, MINIJOB, WERKSTUDENT, APPRENTICE, ON_CALL] }
+        contractedHoursPerWeek: { type: number }
+        startDate: { type: string, format: date }
+        branchIds: { type: array, items: { type: string, format: uuid } }
+        roles: { type: array, items: { type: string } }
+    Employee:
+      allOf:
+        - $ref: "#/components/schemas/EmployeeInput"
+        - type: object
+          properties:
+            id: { type: string, format: uuid }
+            active: { type: boolean }
+            firstFoodWorkDate: { type: string, format: date, nullable: true }
+    DocumentInput:
+      type: object
+      required: [requirementTypeCode, issueDate]
+      properties:
+        requirementTypeCode: { type: string }
+        issueDate: { type: string, format: date }
+        expiryDate: { type: string, format: date, nullable: true }
+        legacyEquivalent: { type: boolean, default: false }
+    DocumentRecord:
+      allOf:
+        - $ref: "#/components/schemas/DocumentInput"
+        - type: object
+          properties:
+            id: { type: string, format: uuid }
+            status: { type: string, enum: [UNVERIFIED, VERIFIED, REJECTED] }
+            hasScan: { type: boolean }
+    Absence:
+      type: object
+      required: [kind, startDate, endDate]
+      properties:
+        kind: { type: string, enum: [APPROVED_LEAVE, SICK_LEAVE, MUSCHG_PROTECTION_PERIOD] }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+    ProtectiveFlag:
+      type: object
+      required: [kind, validFrom]
+      properties:
+        kind: { type: string, enum: [MUSCHG, MUSCHG_NIGHT_22_APPROVED, SGBIX_207_EXEMPTION] }
+        validFrom: { type: string, format: date }
+        validTo: { type: string, format: date, nullable: true }
+    RequirementVersion:
+      type: object
+      required: [requirementTypeCode, severity, ruleType, params, legalSource, effectiveFrom]
+      properties:
+        requirementTypeCode: { type: string }
+        scopeRoles: { type: array, items: { type: string }, nullable: true }
+        scopeBranches: { type: array, items: { type: string, format: uuid }, nullable: true }
+        scopeCondition: { type: string, enum: [ALL, UNDER_18, NON_EU, FOOD_CONTACT_ROLE] }
+        severity: { type: string, enum: [HARD, SOFT] }
+        ruleType: { type: string, enum: [FIXED_EXPIRY, REPEAT_INTERVAL, MAX_AGE_AT_FIRST_USE, INITIAL_AND_FOLLOW_UP, AGE_BLOCK, ABSENCE_BLOCK] }
+        params: { type: object, additionalProperties: true }
+        legalSource: { type: string }
+        effectiveFrom: { type: string, format: date }
+        effectiveTo: { type: string, format: date, nullable: true }
+    EligibilityRequest:
+      type: object
+      required: [employeeId, roleCode, branchId, shiftStart, shiftEnd]
+      properties:
+        employeeId: { type: string, format: uuid }
+        roleCode: { type: string }
+        branchId: { type: string, format: uuid }
+        shiftStart: { type: string, format: date-time }
+        shiftEnd: { type: string, format: date-time }
+    Reason:
+      type: object
+      properties:
+        ruleCode: { type: string }
+        legalSource: { type: string, example: "IfSG §43(1)" }
+        severity: { type: string, enum: [HARD, SOFT] }
+        failingDate: { type: string, format: date }
+        measured: { type: string }
+        limit: { type: string }
+        message: { type: string, description: Localised per Accept-Language (de, en, vi) }
+        fix: { type: string }
+    EligibilityResult:
+      type: object
+      properties:
+        status: { type: string, enum: [ELIGIBLE, ELIGIBLE_WITH_WARNINGS, NOT_ELIGIBLE] }
+        reasons: { type: array, items: { $ref: "#/components/schemas/Reason" } }
+    ExpiryItem:
+      type: object
+      properties:
+        employeeId: { type: string, format: uuid }
+        employeeName: { type: string }
+        requirementTypeCode: { type: string }
+        dueDate: { type: string, format: date }
+        daysLeft: { type: integer }
+        severity: { type: string, enum: [HARD, SOFT] }
