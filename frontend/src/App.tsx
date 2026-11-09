@@ -1,10 +1,1393 @@
-import { Route, Routes } from 'react-router-dom';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  addLine,
+  changeQuantity,
+  checkout,
+  initialState,
+  loadState,
+  money,
+  split,
+  STORAGE_KEY,
+  totals,
+  transfer,
+  type Product,
+  type Receipt,
+  type State,
+} from './pos/model';
+import { vi as t } from './pos/vi';
+import Icon from './pos/Icon';
+import './styles.css';
 
-// Placeholder shell. i18n (T016), login/layout/API client (T017) and pages (T029+) come later.
-export default function App() {
+type Page = keyof typeof t.nav;
+type Modal =
+  | { kind: 'product'; product: Product }
+  | { kind: 'edit'; product: Product }
+  | { kind: 'stock'; id: string }
+  | { kind: 'transfer'; mode: 'move' | 'merge' | 'split' }
+  | { kind: 'payment' }
+  | { kind: 'receipt'; receipt: Receipt }
+  | { kind: 'info' }
+  | null;
+const icons: Record<Page, string> = {
+  pos: 'grid',
+  tables: 'table',
+  menu: 'menu',
+  inventory: 'box',
+  reports: 'chart',
+};
+const categories = ['all', 'main', 'starter', 'drink', 'dessert'] as const;
+const catIcons = ['grid', 'dish', 'leaf', 'coffee', 'cake'];
+
+function ModalShell({
+  title,
+  children,
+  close,
+}: {
+  title: string;
+  children: ReactNode;
+  close: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    ref.current?.focus();
+    const listener = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close();
+      if (event.key === 'Tab') {
+        const items = ref.current?.querySelectorAll<HTMLElement>(
+          'button:not(:disabled), input:not(:disabled), select, textarea, [tabindex="0"]',
+        );
+        if (!items?.length) return;
+        const first = items[0],
+          last = items[items.length - 1];
+        if (
+          event.shiftKey &&
+          (document.activeElement === first ||
+            document.activeElement === ref.current)
+        ) {
+          event.preventDefault();
+          last.focus();
+        } else if (
+          !event.shiftKey &&
+          (document.activeElement === last ||
+            document.activeElement === ref.current)
+        ) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    document.addEventListener('keydown', listener);
+    return () => {
+      document.removeEventListener('keydown', listener);
+      previous?.focus();
+    };
+  }, []);
   return (
-    <Routes>
-      <Route path="/" element={<h1>HSNV</h1>} />
-    </Routes>
+    <div
+      className="modal-backdrop"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) close();
+      }}
+    >
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="modal-title"
+        tabIndex={-1}
+        ref={ref}
+      >
+        <div className="modal-heading">
+          <h2 id="modal-title">{title}</h2>
+          <button className="icon-btn" onClick={close} aria-label={t.close}>
+            <Icon name="close" />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [initial] = useState(() => {
+    try {
+      return { state: loadState(localStorage.getItem(STORAGE_KEY)), error: '' };
+    } catch {
+      return { state: initialState(), error: t.corruptData };
+    }
+  });
+  const [state, setState] = useState(initial.state);
+  const [page, setPage] = useState<Page>('pos');
+  const [tableId, setTableId] = useState(state.tables[0].id);
+  const [category, setCategory] = useState<(typeof categories)[number]>('all');
+  const [query, setQuery] = useState('');
+  const [area, setArea] = useState('all');
+  const [modal, setModal] = useState<Modal>(null);
+  const [online, setOnline] = useState(navigator.onLine);
+  const [toast, setToast] = useState('');
+  const [error, setError] = useState(initial.error);
+  const [discount, setDiscount] = useState(0);
+  const [vat, setVat] = useState(8);
+  const [voucher, setVoucher] = useState('');
+  const [note, setNote] = useState('');
+  const [topping, setTopping] = useState(false);
+  const [target, setTarget] = useState('');
+  const [selectedLines, setSelectedLines] = useState<string[]>([]);
+  const [method, setMethod] = useState<keyof typeof t.methods>('cash');
+  const [cash, setCash] = useState('');
+  const [confirmed, setConfirmed] = useState(false);
+  const [value, setValue] = useState('');
+  const [period, setPeriod] = useState(1);
+  const [actualCash, setActualCash] = useState('');
+  const table = state.tables.find((item) => item.id === tableId)!;
+  const sum = totals(table.lines, discount, vat);
+  const occupied = state.tables.filter((item) => item.lines.length).length;
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine);
+    window.addEventListener('online', update);
+    window.addEventListener('offline', update);
+    return () => {
+      window.removeEventListener('online', update);
+      window.removeEventListener('offline', update);
+    };
+  }, []);
+  useEffect(() => {
+    if (!toast) return;
+    const timeout = setTimeout(() => setToast(''), 3200);
+    return () => clearTimeout(timeout);
+  }, [toast]);
+  const commit = (update: (current: State) => State, message = '') => {
+    if (initial.error) {
+      setError(initial.error);
+      return false;
+    }
+    try {
+      const next = update(state);
+      const serialized = JSON.stringify(next);
+      loadState(serialized);
+      try {
+        localStorage.setItem(STORAGE_KEY, serialized);
+      } catch {
+        throw new Error(t.storageError);
+      }
+      setState(next);
+      setError('');
+      if (message) setToast(message);
+      return true;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t.storageError);
+      return false;
+    }
+  };
+  const open = (next: Modal) => {
+    setError(initial.error);
+    setModal(next);
+    setNote('');
+    setTopping(false);
+    setTarget('');
+    setSelectedLines([]);
+    setConfirmed(false);
+    setCash('');
+  };
+  const switchTable = (id: string) => {
+    setTableId(id);
+    setDiscount(0);
+    setVoucher('');
+  };
+  const normalized = (text: string) =>
+    text
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/đ/g, 'd')
+      .toLowerCase();
+  const products = state.products.filter(
+    (p) =>
+      (category === 'all' || p.category === category) &&
+      normalized(p.name).includes(normalized(query)),
+  );
+  const dateLabel = new Intl.DateTimeFormat('vi-VN', {
+    weekday: 'long',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  }).format(new Date());
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - period + 1);
+  const receipts = state.receipts.filter((r) => new Date(r.createdAt) >= start);
+  const revenue = receipts.reduce((total, r) => total + r.total, 0);
+  const expectedCash = receipts
+    .filter((r) => r.method === 'cash')
+    .reduce((total, r) => total + r.total, 0);
+  const quantity = table.lines.reduce(
+    (total, line) => total + line.quantity,
+    0,
+  );
+  const header =
+    page === 'pos'
+      ? [t.heading, t.subtitle]
+      : page === 'tables'
+        ? [t.tablesTitle, t.tablesSubtitle]
+        : page === 'menu'
+          ? [t.menuTitle, t.menuSubtitle]
+          : page === 'inventory'
+            ? [t.inventoryTitle, t.inventorySubtitle]
+            : [t.reportsTitle, t.reportsSubtitle];
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <a
+          className="brand"
+          href="#"
+          onClick={(e) => {
+            e.preventDefault();
+            setPage('pos');
+          }}
+        >
+          <span className="brand-mark">
+            <Icon name="fork" size={26} />
+          </span>
+          {t.brand}
+        </a>
+        <div className="brand-caption">{t.tagline}</div>
+        <div className="restaurant">
+          <div className="restaurant-icon">
+            <Icon name="dish" />
+          </div>
+          <div>
+            <strong>{t.restaurant}</strong>
+            <small>{t.branch}</small>
+          </div>
+        </div>
+        <div className="nav-label">KHÔNG GIAN QUẢN LÝ</div>
+        <nav>
+          {(Object.keys(t.nav) as Page[]).map((key) => (
+            <button
+              key={key}
+              aria-label={t.nav[key]}
+              aria-current={page === key ? 'page' : undefined}
+              className={`nav-item ${page === key ? 'active' : ''}`}
+              onClick={() => setPage(key)}
+            >
+              <Icon name={icons[key]} />
+              <span>{t.nav[key]}</span>
+              {key === 'pos' && <kbd>POS</kbd>}
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-bottom">
+          <div className="shift-card">
+            <span className="live-dot" />
+            <strong>{t.currentShift}</strong>
+            <small>{t.shiftTime}</small>
+            <span className="shift-note">Bán hàng theo cách của bạn.</span>
+          </div>
+          <button className="help-btn" onClick={() => open({ kind: 'info' })}>
+            <Icon name="help" />
+            {t.settings}
+            <Icon name="chevron" size={16} />
+          </button>
+          <div className="profile">
+            <span className="avatar">TN</span>
+            <div>
+              <strong>Thu ngân</strong>
+              <small>Không gian trải nghiệm</small>
+            </div>
+            <span className="profile-dot" />
+          </div>
+        </div>
+      </aside>
+      <div className="workspace">
+        <header className="topbar">
+          <div className="breadcrumb">
+            {t.restaurant}
+            <Icon name="chevron" size={14} />
+            <strong>{t.nav[page]}</strong>
+          </div>
+          <div className="topbar-right">
+            <span className={`connection ${!online ? 'disconnected' : ''}`}>
+              <Icon name="wifi" size={16} />
+              {online ? t.online : t.offline}
+            </span>
+            <span className="divider" />
+            <span className="date">
+              <Icon name="clock" size={16} />
+              {dateLabel}
+            </span>
+            <span className="demo-badge">{t.demo}</span>
+          </div>
+        </header>
+        <div className={`workbody ${page === 'pos' ? 'with-order' : ''}`}>
+          <main className="main-content">
+            <div className="page-heading">
+              <div>
+                <div className="eyebrow">
+                  <span />
+                  {page === 'pos' ? t.greeting : t.nav[page]}
+                </div>
+                <h1>{header[0]}</h1>
+                <p>{header[1]}</p>
+              </div>
+              <div className="heading-decoration">
+                <Icon name="leaf" size={42} />
+              </div>
+            </div>
+            {error && !modal && (
+              <div role="alert" className="error-banner">
+                {error}
+              </div>
+            )}
+            {page === 'pos' && (
+              <>
+                <div className="table-toolbar">
+                  <div className="table-toolbar-icon">
+                    <Icon name="table" size={24} />
+                  </div>
+                  <div>
+                    <span className="small-label">ĐANG PHỤC VỤ TẠI</span>
+                    <label className="table-select">
+                      <select
+                        aria-label={t.chooseTable}
+                        value={tableId}
+                        onChange={(e) => switchTable(e.target.value)}
+                      >
+                        {state.tables.map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.name} ·{' '}
+                            {item.area === 'indoor' ? t.indoor : t.outdoor}
+                            {item.lines.length ? ' · Có khách' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <span className="table-seats">
+                    <Icon name="people" size={16} />
+                    {table.seats} {t.guests}
+                  </span>
+                  <button
+                    className="text-button"
+                    onClick={() => setPage('tables')}
+                  >
+                    {t.nav.tables}
+                    <Icon name="arrow" size={16} />
+                  </button>
+                </div>
+                <div className="section-heading">
+                  <h2>
+                    {t.nav.menu}
+                    <span className="count-badge">{state.products.length}</span>
+                  </h2>
+                  <span className="muted small">
+                    Tươi ngon mỗi ngày <Icon name="leaf" size={14} />
+                  </span>
+                </div>
+              </>
+            )}
+            {(page === 'pos' || page === 'menu') && (
+              <>
+                <div className="menu-controls">
+                  <div className="search-box">
+                    <Icon name="search" size={19} />
+                    <input
+                      aria-label={t.search}
+                      placeholder={t.search}
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                    />
+                    {query && (
+                      <button
+                        className="icon-btn"
+                        aria-label="Xóa tìm kiếm"
+                        onClick={() => setQuery('')}
+                      >
+                        <Icon name="close" size={15} />
+                      </button>
+                    )}
+                    <kbd>⌕</kbd>
+                  </div>
+                </div>
+                <div className="category-tabs">
+                  {categories.map((key, i) => (
+                    <button
+                      key={key}
+                      className={category === key ? 'selected' : ''}
+                      onClick={() => setCategory(key)}
+                    >
+                      <Icon name={catIcons[i]} size={18} />
+                      {t.categories[key]}
+                      {category === key && (
+                        <span>
+                          {
+                            state.products.filter(
+                              (p) => key === 'all' || p.category === key,
+                            ).length
+                          }
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+                <div className="product-grid">
+                  {products.map((product, index) => (
+                    <article
+                      className={`product-card ${!product.available ? 'sold-out' : ''}`}
+                      key={product.id}
+                    >
+                      <button
+                        className="product-image-button"
+                        disabled={page === 'pos' && !product.available}
+                        aria-label={`${page === 'menu' ? t.edit : t.add}: ${product.name}`}
+                        onClick={() => {
+                          if (page === 'menu') {
+                            setValue(String(product.price));
+                            open({ kind: 'edit', product });
+                          } else open({ kind: 'product', product });
+                        }}
+                      >
+                        <img src={product.image} alt={product.name} />
+                        {!product.available ? (
+                          <span className="image-badge unavailable">
+                            {t.unavailable}
+                          </span>
+                        ) : index < 2 && category === 'all' ? (
+                          <span className="image-badge">
+                            <span>✦</span> Bếp đề xuất
+                          </span>
+                        ) : null}
+                      </button>
+                      <div className="product-details">
+                        <span className="product-category">
+                          {t.categories[product.category]}
+                        </span>
+                        <h3>{product.name}</h3>
+                        <div className="product-bottom">
+                          <strong>{money(product.price)}</strong>
+                          <button
+                            className="add-button"
+                            disabled={page === 'pos' && !product.available}
+                            aria-label={`${page === 'menu' ? t.edit : t.add}: ${product.name}`}
+                            onClick={() => {
+                              if (page === 'menu') {
+                                setValue(String(product.price));
+                                open({ kind: 'edit', product });
+                              } else {
+                                commit(
+                                  (s) => addLine(s, tableId, product.id),
+                                  t.toastAdded,
+                                );
+                              }
+                            }}
+                          >
+                            <Icon
+                              name={page === 'menu' ? 'edit' : 'plus'}
+                              size={19}
+                            />
+                          </button>
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+                {!products.length && (
+                  <div className="empty-state">
+                    <Icon name="search" size={35} />
+                    <h3>{t.noResults}</h3>
+                  </div>
+                )}
+                <div className="menu-footer">
+                  <span className="live-dot" />
+                  {t.local}
+                  <span>•</span>
+                  {t.demoFootnote}
+                </div>
+              </>
+            )}
+            {page === 'tables' && (
+              <>
+                <div className="table-summary">
+                  <span>
+                    <i className="status-dot green" />
+                    {t.empty} <strong>{state.tables.length - occupied}</strong>
+                  </span>
+                  <span>
+                    <i className="status-dot orange" />
+                    {t.serving} <strong>{occupied}</strong>
+                  </span>
+                  <select
+                    aria-label={t.allAreas}
+                    value={area}
+                    onChange={(e) => setArea(e.target.value)}
+                  >
+                    <option value="all">{t.allAreas}</option>
+                    <option value="indoor">{t.indoor}</option>
+                    <option value="outdoor">{t.outdoor}</option>
+                  </select>
+                </div>
+                <div className="tables-grid">
+                  {state.tables
+                    .filter((item) => area === 'all' || item.area === area)
+                    .map((item) => (
+                      <button
+                        className={`table-card ${item.lines.length ? 'occupied' : ''}`}
+                        key={item.id}
+                        onClick={() => {
+                          switchTable(item.id);
+                          setPage('pos');
+                        }}
+                      >
+                        <div className="table-card-top">
+                          <span>
+                            {item.area === 'indoor' ? t.indoor : t.outdoor}
+                          </span>
+                          <span>
+                            {item.seats} {t.guests}
+                          </span>
+                        </div>
+                        <Icon name="table" size={50} />
+                        <h2>{item.name}</h2>
+                        <span className="table-status">
+                          {item.lines.length ? t.serving : t.empty}
+                        </span>
+                        <div className="table-card-bottom">
+                          {item.lines.length
+                            ? `${item.lines.reduce((n, l) => n + l.quantity, 0)} ${t.items} · ${money(totals(item.lines, 0, 0).total)}`
+                            : t.tableHint}
+                        </div>
+                      </button>
+                    ))}
+                </div>
+              </>
+            )}
+            {page === 'inventory' && (
+              <>
+                <div className="inventory-note">
+                  <Icon name="box" />
+                  {
+                    state.ingredients.filter((i) => i.stock <= i.min).length
+                  }{' '}
+                  nguyên liệu cần bổ sung
+                  <span>Định lượng mẫu · Trừ khi thanh toán</span>
+                </div>
+                <div className="data-card">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>{t.ingredient}</th>
+                        <th>{t.stock}</th>
+                        <th>{t.min}</th>
+                        <th>{t.availability}</th>
+                        <th />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {state.ingredients.map((item) => (
+                        <tr key={item.id}>
+                          <td>
+                            <strong>{item.name}</strong>
+                          </td>
+                          <td>
+                            {Number(item.stock.toFixed(3))}{' '}
+                            <span className="muted">{item.unit}</span>
+                          </td>
+                          <td>
+                            {item.min} {item.unit}
+                          </td>
+                          <td>
+                            <span
+                              className={`status-pill ${item.stock <= item.min ? 'warning' : ''}`}
+                            >
+                              {item.stock <= item.min ? t.low : t.good}
+                            </span>
+                          </td>
+                          <td>
+                            <button
+                              className="secondary compact"
+                              onClick={() => {
+                                setValue('');
+                                open({ kind: 'stock', id: item.id });
+                              }}
+                            >
+                              <Icon name="plus" size={15} />
+                              {t.restock}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+            {page === 'reports' && (
+              <>
+                <div className="period-tabs">
+                  {[1, 7, 30].map((n, i) => (
+                    <button
+                      key={n}
+                      className={period === n ? 'selected' : ''}
+                      onClick={() => setPeriod(n)}
+                    >
+                      {[t.today, t.week, t.month][i]}
+                    </button>
+                  ))}
+                </div>
+                <div className="stats-grid">
+                  {[
+                    [t.revenue, money(revenue), 'chart'],
+                    [t.bills, String(receipts.length), 'receipt'],
+                    [
+                      t.average,
+                      money(
+                        receipts.length
+                          ? Math.round(revenue / receipts.length)
+                          : 0,
+                      ),
+                      'tag',
+                    ],
+                    [t.cash, money(expectedCash), 'wallet'],
+                  ].map(([label, amount, icon]) => (
+                    <div className="stat-card" key={label}>
+                      <span>
+                        {label}
+                        <Icon name={icon} />
+                      </span>
+                      <strong>{amount}</strong>
+                      <small>
+                        {period === 1 ? t.today : `${period} ngày gần nhất`}
+                      </small>
+                    </div>
+                  ))}
+                </div>
+                <div className="data-card">
+                  <div className="card-heading">
+                    <h2>{t.recent}</h2>
+                    <span className="count-badge">{receipts.length}</span>
+                  </div>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>{t.receipt}</th>
+                        <th>{t.table}</th>
+                        <th>{t.time}</th>
+                        <th>{t.method}</th>
+                        <th>{t.total}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {receipts
+                        .slice()
+                        .reverse()
+                        .map((r) => (
+                          <tr key={r.id}>
+                            <td>
+                              <button
+                                className="text-button"
+                                onClick={() =>
+                                  open({ kind: 'receipt', receipt: r })
+                                }
+                              >
+                                #{r.id.slice(-6).toUpperCase()}
+                              </button>
+                            </td>
+                            <td>{r.tableName}</td>
+                            <td>
+                              {new Date(r.createdAt).toLocaleString('vi-VN')}
+                            </td>
+                            <td>
+                              {t.methods[r.method as keyof typeof t.methods] ||
+                                r.method}
+                            </td>
+                            <td>
+                              <strong>{money(r.total)}</strong>
+                            </td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                  {!receipts.length && (
+                    <div className="empty-state">
+                      <Icon name="receipt" size={36} />
+                      <p>{t.noReceipts}</p>
+                    </div>
+                  )}
+                </div>
+                <div className="reconcile data-card">
+                  <div>
+                    <h2>{t.cashControl}</h2>
+                    <p>{t.cashHint}</p>
+                  </div>
+                  <div className="reconcile-fields">
+                    <label>
+                      {t.expected}
+                      <strong>{money(expectedCash)}</strong>
+                    </label>
+                    <label>
+                      {t.actual}
+                      <input
+                        type="number"
+                        min="0"
+                        value={actualCash}
+                        placeholder="0"
+                        onChange={(e) => setActualCash(e.target.value)}
+                      />
+                    </label>
+                    <label>
+                      {t.difference}
+                      <strong
+                        className={
+                          actualCash && Number(actualCash) !== expectedCash
+                            ? 'negative'
+                            : ''
+                        }
+                      >
+                        {actualCash
+                          ? money(Number(actualCash) - expectedCash)
+                          : '—'}
+                      </strong>
+                    </label>
+                  </div>
+                </div>
+              </>
+            )}
+          </main>
+          {page === 'pos' && (
+            <aside className="order-panel">
+              <div className="order-top">
+                <div>
+                  <span className="small-label">{t.order}</span>
+                  <h2>
+                    {table.name}
+                    <span className="order-badge">
+                      {quantity} {t.items}
+                    </span>
+                  </h2>
+                </div>
+                <span className="order-icon">
+                  <Icon name="receipt" size={24} />
+                </span>
+              </div>
+              <div className="order-meta">
+                <span>
+                  <span className="live-dot" />
+                  {table.lines.length ? t.serving : t.empty}
+                </span>
+                <span>
+                  <Icon name="people" size={14} />
+                  {table.seats} {t.guests}
+                </span>
+              </div>
+              <div className="order-actions">
+                {(['move', 'merge', 'split'] as const).map((mode, i) => (
+                  <button
+                    key={mode}
+                    disabled={!table.lines.length}
+                    onClick={() => open({ kind: 'transfer', mode })}
+                  >
+                    <Icon name={['arrow', 'table', 'receipt'][i]} size={15} />
+                    {t[mode]}
+                  </button>
+                ))}
+              </div>
+              <div className="order-lines">
+                {!table.lines.length ? (
+                  <div className="order-empty">
+                    <div>
+                      <Icon name="dish" size={48} />
+                    </div>
+                    <h3>{t.noOrder}</h3>
+                    <p>{t.noOrderHint}</p>
+                    <span>Ngon từ món đầu tiên.</span>
+                  </div>
+                ) : (
+                  table.lines.map((line) => (
+                    <div className="order-line" key={line.id}>
+                      <img
+                        src={
+                          state.products.find((p) => p.id === line.productId)
+                            ?.image
+                        }
+                        alt=""
+                      />
+                      <div className="line-content">
+                        <h3>{line.name}</h3>
+                        {line.note && <p>{line.note}</p>}
+                        <div className="line-controls">
+                          <div className="stepper">
+                            <button
+                              aria-label={`Giảm ${line.name}`}
+                              onClick={() =>
+                                commit((s) =>
+                                  changeQuantity(s, tableId, line.id, -1),
+                                )
+                              }
+                            >
+                              <Icon name="minus" size={12} />
+                            </button>
+                            <span>{line.quantity}</span>
+                            <button
+                              aria-label={`Tăng ${line.name}`}
+                              onClick={() =>
+                                commit((s) =>
+                                  changeQuantity(s, tableId, line.id, 1),
+                                )
+                              }
+                            >
+                              <Icon name="plus" size={12} />
+                            </button>
+                          </div>
+                          <strong>{money(line.price * line.quantity)}</strong>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+              <div className="order-bottom">
+                <div className="voucher-field">
+                  <Icon name="tag" size={18} />
+                  <input
+                    aria-label={t.voucher}
+                    placeholder="Thêm mã ưu đãi (BEP10)"
+                    value={voucher}
+                    onChange={(e) => setVoucher(e.target.value)}
+                  />
+                  <button
+                    onClick={() => {
+                      if (voucher.trim().toUpperCase() === 'BEP10') {
+                        setDiscount(10);
+                        setError('');
+                        setToast('Đã áp dụng giảm giá 10%');
+                      } else setError(t.invalidVoucher);
+                    }}
+                  >
+                    {t.apply}
+                  </button>
+                </div>
+                <div className="bill-summary">
+                  <div>
+                    <span>{t.subtotal}</span>
+                    <strong>{money(sum.subtotal)}</strong>
+                  </div>
+                  <div>
+                    <label>
+                      {t.discount}{' '}
+                      <input
+                        aria-label="Phần trăm giảm giá"
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={discount}
+                        onChange={(e) =>
+                          setDiscount(
+                            Math.min(100, Math.max(0, Number(e.target.value))),
+                          )
+                        }
+                      />
+                      %
+                    </label>
+                    <span className="discount-value">
+                      −{money(sum.discount)}
+                    </span>
+                  </div>
+                  <div>
+                    <label>
+                      {t.vat}{' '}
+                      <input
+                        aria-label="Phần trăm VAT"
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={vat}
+                        onChange={(e) =>
+                          setVat(
+                            Math.min(100, Math.max(0, Number(e.target.value))),
+                          )
+                        }
+                      />
+                      %
+                    </label>
+                    <strong>{money(sum.vat)}</strong>
+                  </div>
+                </div>
+                <div className="bill-total">
+                  <strong>{t.total}</strong>
+                  <strong>{money(sum.total)}</strong>
+                </div>
+                <button
+                  className="primary pay-button"
+                  disabled={!table.lines.length || !!initial.error}
+                  onClick={() => open({ kind: 'payment' })}
+                >
+                  <Icon name="wallet" />
+                  {t.pay}
+                  <Icon name="arrow" />
+                </button>
+                <div className="order-footnote">
+                  <Icon name="check" size={13} />
+                  {t.local}
+                </div>
+              </div>
+            </aside>
+          )}
+        </div>
+      </div>
+      {toast && (
+        <div className="toast" role="status">
+          <span>
+            <Icon name="check" size={17} />
+          </span>
+          {toast}
+        </div>
+      )}
+      {modal && (
+        <ModalShell
+          title={
+            modal.kind === 'product' || modal.kind === 'edit'
+              ? modal.product.name
+              : modal.kind === 'payment'
+                ? t.paymentTitle
+                : modal.kind === 'transfer'
+                  ? t[modal.mode]
+                  : modal.kind === 'stock'
+                    ? t.restock
+                    : modal.kind === 'receipt'
+                      ? t.receipt
+                      : t.infoTitle
+          }
+          close={() => setModal(null)}
+        >
+          {error && (
+            <div className="error-banner" role="alert">
+              {error}
+            </div>
+          )}
+          {modal.kind === 'product' && (
+            <>
+              <img
+                className="modal-food"
+                src={modal.product.image}
+                alt={modal.product.name}
+              />
+              <div className="modal-price">
+                {t.categories[modal.product.category]}
+                <strong>{money(modal.product.price)}</strong>
+              </div>
+              <label className="field-label">
+                {t.note}
+                <textarea
+                  placeholder={t.notePlaceholder}
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  maxLength={200}
+                />
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={topping}
+                  onChange={(e) => setTopping(e.target.checked)}
+                />
+                <span>
+                  <strong>{t.topping}</strong>
+                  <small>{t.toppingHint}</small>
+                </span>
+              </label>
+              <button
+                className="primary full"
+                onClick={() => {
+                  if (
+                    commit(
+                      (s) =>
+                        addLine(s, tableId, modal.product.id, note, topping),
+                      t.toastAdded,
+                    )
+                  )
+                    setModal(null);
+                }}
+              >
+                {t.add}
+                <span>
+                  {money(modal.product.price + (topping ? 10000 : 0))}
+                </span>
+              </button>
+            </>
+          )}
+          {modal.kind === 'edit' && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const price = Number(value);
+                if (!Number.isSafeInteger(price) || price < 0) {
+                  setError('Giá phải là số nguyên không âm.');
+                  return;
+                }
+                if (
+                  commit(
+                    (s) => ({
+                      ...s,
+                      products: s.products.map((p) =>
+                        p.id === modal.product.id ? { ...p, price } : p,
+                      ),
+                    }),
+                    t.toastSaved,
+                  )
+                )
+                  setModal(null);
+              }}
+            >
+              <label className="field-label">
+                {t.price} (₫)
+                <input
+                  type="number"
+                  required
+                  min="0"
+                  step="1"
+                  value={value}
+                  onChange={(e) => setValue(e.target.value)}
+                />
+              </label>
+              <p className="muted">
+                Giá mới chỉ áp dụng cho món thêm sau khi cập nhật.
+              </p>
+              <button
+                type="button"
+                className="secondary full"
+                onClick={() => {
+                  if (
+                    commit(
+                      (s) => ({
+                        ...s,
+                        products: s.products.map((p) =>
+                          p.id === modal.product.id
+                            ? { ...p, available: !p.available }
+                            : p,
+                        ),
+                      }),
+                      t.toastSaved,
+                    )
+                  )
+                    setModal(null);
+                }}
+              >
+                {modal.product.available
+                  ? 'Đánh dấu hết món'
+                  : 'Mở bán trở lại'}
+              </button>
+              <button className="primary full spaced">{t.save}</button>
+            </form>
+          )}
+          {modal.kind === 'stock' && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const amount = Number(value);
+                if (!Number.isFinite(amount) || amount <= 0) {
+                  setError('Số lượng nhập phải lớn hơn 0.');
+                  return;
+                }
+                if (
+                  commit(
+                    (s) => ({
+                      ...s,
+                      ingredients: s.ingredients.map((i) =>
+                        i.id === modal.id
+                          ? {
+                              ...i,
+                              stock:
+                                Math.round((i.stock + amount) * 1000) / 1000,
+                            }
+                          : i,
+                      ),
+                    }),
+                    t.toastSaved,
+                  )
+                )
+                  setModal(null);
+              }}
+            >
+              <p>{state.ingredients.find((i) => i.id === modal.id)?.name}</p>
+              <label className="field-label">
+                {t.quantity} (
+                {state.ingredients.find((i) => i.id === modal.id)?.unit})
+                <input
+                  type="number"
+                  required
+                  min="0.001"
+                  step="0.001"
+                  value={value}
+                  onChange={(e) => setValue(e.target.value)}
+                />
+              </label>
+              <button className="primary full">{t.confirm}</button>
+            </form>
+          )}
+          {modal.kind === 'transfer' && (
+            <>
+              <p className="muted">
+                {modal.mode === 'move'
+                  ? t.transferHint
+                  : modal.mode === 'merge'
+                    ? t.mergeHint
+                    : t.splitHint}
+              </p>
+              <label className="field-label">
+                {t.selectTarget}
+                <select
+                  value={target}
+                  onChange={(e) => setTarget(e.target.value)}
+                >
+                  <option value="">{t.chooseTable}</option>
+                  {state.tables
+                    .filter(
+                      (item) =>
+                        item.id !== tableId &&
+                        (modal.mode === 'merge' || !item.lines.length),
+                    )
+                    .map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.name}
+                        {item.lines.length ? ' · ' + t.serving : ''}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              {modal.mode === 'split' && (
+                <div className="split-lines">
+                  <p>{t.selectLines}</p>
+                  {table.lines.map((line) => (
+                    <label className="checkbox-row" key={line.id}>
+                      <input
+                        type="checkbox"
+                        checked={selectedLines.includes(line.id)}
+                        onChange={(e) =>
+                          setSelectedLines(
+                            e.target.checked
+                              ? [...selectedLines, line.id]
+                              : selectedLines.filter((id) => id !== line.id),
+                          )
+                        }
+                      />
+                      <span>
+                        {line.quantity} × {line.name}
+                      </span>
+                      <strong>{money(line.quantity * line.price)}</strong>
+                    </label>
+                  ))}
+                </div>
+              )}
+              <button
+                className="primary full"
+                disabled={
+                  !target || (modal.mode === 'split' && !selectedLines.length)
+                }
+                onClick={() => {
+                  if (
+                    commit(
+                      (s) =>
+                        modal.mode === 'split'
+                          ? split(s, tableId, target, selectedLines)
+                          : transfer(s, tableId, target, modal.mode),
+                      t.toastMoved,
+                    )
+                  ) {
+                    switchTable(target);
+                    setModal(null);
+                  }
+                }}
+              >
+                {t.confirm}
+                <Icon name="arrow" size={18} />
+              </button>
+            </>
+          )}
+          {modal.kind === 'payment' && (
+            <>
+              <div className="payment-amount">
+                <span>
+                  {table.name} · {quantity} {t.items}
+                </span>
+                <strong>{money(sum.total)}</strong>
+              </div>
+              <p className="notice">{t.paymentHint}</p>
+              <div className="payment-methods">
+                {(Object.keys(t.methods) as (keyof typeof t.methods)[]).map(
+                  (key) => (
+                    <button
+                      key={key}
+                      className={method === key ? 'selected' : ''}
+                      onClick={() => {
+                        setMethod(key);
+                        setConfirmed(false);
+                      }}
+                    >
+                      <Icon
+                        name={
+                          key === 'cash'
+                            ? 'wallet'
+                            : key === 'card'
+                              ? 'receipt'
+                              : 'grid'
+                        }
+                      />
+                      {t.methods[key]}
+                    </button>
+                  ),
+                )}
+              </div>
+              {method === 'cash' ? (
+                <>
+                  <label className="field-label">
+                    {t.cashReceived}
+                    <input
+                      type="number"
+                      min={sum.total}
+                      step="1"
+                      placeholder={String(sum.total)}
+                      value={cash}
+                      onChange={(e) => setCash(e.target.value)}
+                    />
+                  </label>
+                  <div className="cash-shortcuts">
+                    {Array.from(
+                      new Set([
+                        sum.total,
+                        Math.ceil(sum.total / 50000) * 50000,
+                        Math.ceil(sum.total / 100000) * 100000,
+                      ]),
+                    ).map((n) => (
+                      <button
+                        className="secondary"
+                        key={n}
+                        onClick={() => setCash(String(n))}
+                      >
+                        {money(n)}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="cash-change">
+                    <span>{t.change}</span>
+                    <strong>
+                      {money(Math.max(0, Number(cash) - sum.total))}
+                    </strong>
+                  </div>
+                </>
+              ) : (
+                <label className="checkbox-row payment-confirm">
+                  <input
+                    type="checkbox"
+                    checked={confirmed}
+                    onChange={(e) => setConfirmed(e.target.checked)}
+                  />
+                  <span>{t.manualConfirm}</span>
+                </label>
+              )}
+              <button
+                className="primary full"
+                disabled={
+                  method === 'cash'
+                    ? cash === '' || Number(cash) < sum.total
+                    : !confirmed
+                }
+                onClick={() => {
+                  let receipt: Receipt | undefined;
+                  const saved = commit((s) => {
+                    const next = checkout(
+                      s,
+                      tableId,
+                      method,
+                      discount,
+                      vat,
+                      method === 'cash' ? Number(cash) : 0,
+                    );
+                    receipt = next.receipts[next.receipts.length - 1];
+                    return next;
+                  }, t.paid);
+                  if (saved && receipt) {
+                    setDiscount(0);
+                    setVoucher('');
+                    setModal({ kind: 'receipt', receipt });
+                  }
+                }}
+              >
+                <Icon name="check" size={18} />
+                {t.savePayment}
+              </button>
+            </>
+          )}
+          {modal.kind === 'receipt' && (
+            <>
+              <div className="receipt-paper">
+                <div className="receipt-brand">{t.brand}</div>
+                <h3>{t.restaurant}</h3>
+                <p>
+                  #{modal.receipt.id.slice(-6).toUpperCase()} ·{' '}
+                  {modal.receipt.tableName}
+                </p>
+                <p>
+                  {new Date(modal.receipt.createdAt).toLocaleString('vi-VN')}
+                </p>
+                <div className="receipt-lines">
+                  {modal.receipt.lines.map((line) => (
+                    <div key={line.id}>
+                      <span>
+                        {line.quantity} × {line.name}
+                        {line.note && <small>{line.note}</small>}
+                      </span>
+                      <strong>{money(line.quantity * line.price)}</strong>
+                    </div>
+                  ))}
+                </div>
+                <div className="receipt-totals">
+                  <div>
+                    <span>{t.subtotal}</span>
+                    {money(modal.receipt.subtotal)}
+                  </div>
+                  <div>
+                    <span>{t.discount}</span>−{money(modal.receipt.discount)}
+                  </div>
+                  <div>
+                    <span>{t.vat}</span>
+                    {money(modal.receipt.vat)}
+                  </div>
+                  <div className="receipt-grand">
+                    <strong>{t.total}</strong>
+                    <strong>{money(modal.receipt.total)}</strong>
+                  </div>
+                  <div>
+                    <span>{t.method}</span>
+                    {t.methods[modal.receipt.method as keyof typeof t.methods]}
+                  </div>
+                </div>
+                <p>Cảm ơn bạn đã ghé Bếp!</p>
+                <small>Hóa đơn trải nghiệm · Không phải hóa đơn thuế</small>
+              </div>
+              <div className="modal-footer">
+                <button className="secondary" onClick={() => window.print()}>
+                  {t.print}
+                </button>
+                <button className="primary" onClick={() => setModal(null)}>
+                  {t.done}
+                  <Icon name="check" size={18} />
+                </button>
+              </div>
+            </>
+          )}
+          {modal.kind === 'info' && (
+            <>
+              <div className="info-icon">
+                <Icon name="leaf" size={36} />
+              </div>
+              <p className="info-body">{t.infoBody}</p>
+              <button className="primary full" onClick={() => setModal(null)}>
+                {t.close}
+              </button>
+            </>
+          )}
+        </ModalShell>
+      )}
+    </div>
   );
 }
