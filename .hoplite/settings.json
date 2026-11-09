@@ -1,0 +1,1 @@
+{"scripts":{"setup":{"command":"cd frontend && npm ci"},"run":{"command":"cd frontend && npm run dev -- --host 0.0.0.0"}},"ports":{"preview":5173,"additional":{}}}
