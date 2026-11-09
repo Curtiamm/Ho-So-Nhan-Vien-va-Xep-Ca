@@ -24,3 +24,6 @@ Thumbs.db
 *.tmp
 *.swp
 *.tsbuildinfo
+
+# Local preview evidence
+.hoplite/artifacts/
