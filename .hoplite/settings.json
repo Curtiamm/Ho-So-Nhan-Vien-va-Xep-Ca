@@ -1,0 +1,14 @@
+{
+  "scripts": {
+    "setup": {
+      "command": "cd frontend && npm ci"
+    },
+    "run": {
+      "command": "cd frontend && npm run build && npm run preview -- --host 0.0.0.0 --port 5173"
+    }
+  },
+  "ports": {
+    "preview": 5173,
+    "additional": {}
+  }
+}
